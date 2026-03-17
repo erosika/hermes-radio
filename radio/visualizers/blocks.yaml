@@ -1,0 +1,15 @@
+name: blocks
+mode: bars
+chars: blocks
+rows: 2
+width: 24
+colors:
+  - "#56d4dd"
+  - "#7eb8f6"
+  - "#bc8cff"
+  - "#e6a855"
+attack: 8.0
+decay: 3.0
+center_boost: 0.3
+mirror: false
+peak_hold: 0.8

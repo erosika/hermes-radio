@@ -1,0 +1,21 @@
+[project]
+name = "hermes-radio"
+version = "0.1.0"
+description = "Internet radio for Hermes Agent"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+hermes = [
+    "hermes-agent",
+]
+
+[project.scripts]
+hermes-radio = "hermes_radio.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

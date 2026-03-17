@@ -1,0 +1,23 @@
+name: scatter
+scene: scatter
+mode: scatter
+chars: dots
+rows: 4
+width: 64
+colors:
+  - "#bc8cff"
+  - "#7eb8f6"
+  - "#56d4dd"
+  - "#ffd27a"
+attack: 20.0
+decay: 8.0
+center_boost: 0.0
+mirror: false
+peak_hold: 0.0
+gamma: 0.82
+floor: 0.02
+contrast: 1.14
+trail: 0.22
+pulse_gain: 0.72
+detail: 1.25
+blur: 0

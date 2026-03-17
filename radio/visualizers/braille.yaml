@@ -1,0 +1,24 @@
+name: braille
+scene: braille
+mode: braille
+chars: braille
+rows: 5
+width: 64
+colors:
+  - "#8ce6ff"
+  - "#7eb8f6"
+  - "#9b8cf6"
+  - "#bc8cff"
+  - "#ffd27a"
+attack: 13.5
+decay: 4.2
+center_boost: 0.18
+mirror: false
+peak_hold: 0.0
+gamma: 0.76
+floor: 0.016
+contrast: 1.18
+trail: 0.34
+pulse_gain: 0.9
+detail: 1.4
+blur: 0

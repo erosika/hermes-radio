@@ -1,0 +1,200 @@
+# Curated stations for Hermes Radio.
+# Override with ~/.hermes/radio/stations.yaml
+
+stations:
+  # erosika
+  - name: Erosika DJ
+    url: https://radio.erosika.world/erosika
+    region: community
+    genre: curated
+    location: NYC
+
+  # Community / Freeform
+  - name: NTS Radio 1
+    url: http://stream-relay-geo.ntslive.net/stream
+    region: community
+    genre: freeform
+    location: London
+
+  - name: NTS Radio 2
+    url: http://stream-relay-geo.ntslive.net/stream2
+    region: community
+    genre: freeform
+    location: London
+
+  - name: The Lot Radio
+    url: https://livepeercdn.studio/hls/85c28sa2o8wppm58/index.m3u8
+    region: community
+    genre: freeform
+    location: Brooklyn
+
+  - name: Kiosk Radio
+    url: https://kioskradiobxl.out.airtime.pro/kioskradiobxl_b
+    region: community
+    genre: eclectic
+    location: Brussels
+
+  - name: Rinse UK
+    url: https://admin.stream.rinse.fm/proxy/rinse_uk/stream
+    region: community
+    genre: grime / jungle / garage
+    location: London
+
+  # SomaFM underground (San Francisco)
+  - name: SomaFM DEF CON
+    url: https://somafm.com/defcon256.pls
+    region: somafm
+    genre: hacker electronic
+    location: San Francisco
+
+  - name: SomaFM Drone Zone
+    url: https://somafm.com/dronezone256.pls
+    region: somafm
+    genre: ambient
+    location: San Francisco
+
+  - name: SomaFM Deep Space One
+    url: https://somafm.com/deepspaceone.pls
+    region: somafm
+    genre: deep ambient
+    location: San Francisco
+
+  - name: SomaFM Vaporwaves
+    url: https://somafm.com/vaporwaves.pls
+    region: somafm
+    genre: vaporwave
+    location: San Francisco
+
+  - name: SomaFM The Dark Zone
+    url: https://somafm.com/darkzone256.pls
+    region: somafm
+    genre: dark ambient
+    location: San Francisco
+
+  - name: SomaFM n5MD
+    url: https://somafm.com/n5md130.pls
+    region: somafm
+    genre: experimental electronic
+    location: San Francisco
+
+  - name: SomaFM cliqhop
+    url: https://somafm.com/cliqhop256.pls
+    region: somafm
+    genre: idm
+    location: San Francisco
+
+  # Acid / Techno
+  - name: Radio Caprice ACID HOUSE
+    url: http://79.111.119.111:8002/acid
+    region: acid
+    genre: acid house / trance
+    location: Moscow
+
+  - name: Trancetechnic Radio
+    url: https://s11.ssl-stream.com/ssl/trancete?mp=/stream
+    region: acid
+    genre: acid techno
+    location: online
+
+  # Breakbeat / Jungle / DnB
+  - name: Kool FM
+    url: https://admin.stream.rinse.fm/proxy/kool/stream
+    region: breaks
+    genre: jungle / dnb / breakbeat
+    location: London
+
+  - name: UK Bass Radio
+    url: https://www.ukbassradio.com/stream
+    region: breaks
+    genre: breakbeat / garage / dubstep
+    location: UK
+
+  - name: Radio Caprice Breakcore
+    url: http://79.111.119.111:8004/breakcore
+    region: breaks
+    genre: breakcore / idm
+    location: Moscow
+
+  # Chiptune / Game Music
+  - name: Retro PC Game Music
+    url: http://gyusyabu.ddo.jp:8000/listen.pls
+    region: game
+    genre: retro game soundtracks
+    location: Osaka
+
+  - name: Gamesboro Radio
+    url: https://radio.gamesboro.org/listen/gamesboro_radio/radio.mp3
+    region: game
+    genre: vgm 24/7
+    location: online
+
+  - name: Gameoverse Radio
+    url: https://radio.gameoverse.com/listen/gameoverse_radio/radio.mp3
+    region: game
+    genre: anime / vgm / ost
+    location: online
+
+  # Vaporwave
+  - name: Nightwave Plaza
+    url: https://radio.plaza.one/ogg
+    region: vapor
+    genre: vaporwave / future funk
+    location: online
+
+  # Dark / Industrial / Experimental
+  - name: Drone Radio
+    url: http://listen.mrg.fm:8070/stream
+    region: dark
+    genre: drone / deep ambient
+    location: online
+
+  - name: SoundWorks Radio
+    url: https://soundworks.live/listen/soundworks/radio.mp3
+    region: dark
+    genre: darkwave / ebm / industrial
+    location: online
+
+  - name: RADCAP Dark Ambient
+    url: http://79.120.39.202:8000/darkambient
+    region: dark
+    genre: ritual / dark ambient
+    location: Moscow
+
+  # Africa
+  - name: Amapiano FM
+    url: https://stream.zeno.fm/xs6zeac1ts8uv
+    region: africa
+    genre: amapiano
+    location: South Africa
+
+  - name: Softlife Afrofusion
+    url: https://eu4.fastcast4u.com/proxy/softlife?mp=/1
+    region: africa
+    genre: afrohouse / amapiano
+    location: Lagos
+
+  - name: Radio Hits 88.2
+    url: https://radiohits882.radioca.st/;
+    region: africa
+    genre: arabic / electronic
+    location: Cairo
+
+  - name: Bush Radio 89.5
+    url: https://radio.garden/api/ara/content/listen/bush-radio/channel.mp3
+    region: africa
+    genre: community / zef
+    location: Cape Town
+
+  # Australia
+  - name: FBi Radio 94.5
+    url: https://streamer.fbiradio.com/stream
+    region: australia
+    genre: indie / community
+    location: Sydney
+
+  # Dub Techno
+  - name: Radio Schizoid Dub Techno
+    url: http://94.130.113.214:8000/dubtechno
+    region: dub
+    genre: dub techno
+    location: India
