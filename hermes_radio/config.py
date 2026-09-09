@@ -1,45 +1,37 @@
-"""Radio config persistence.
+"""Radio config persistence in ``$HERMES_HOME/radio/config.yaml``."""
 
-Saves/loads radio settings to ~/.hermes/radio/config.yaml.
-Separate from the main hermes config so radio state doesn't
-pollute the core config file.
-"""
-
-import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Set
 
 import yaml
 
-RADIO_DIR = Path(os.path.expanduser("~/.hermes/radio"))
-CONFIG_PATH = RADIO_DIR / "config.yaml"
+from . import paths
 
 
-def _ensure_dir():
-    RADIO_DIR.mkdir(parents=True, exist_ok=True)
+def config_path() -> Path:
+    return paths.config_path()
 
 
 def load() -> Dict[str, Any]:
     """Load radio config. Returns empty dict if not found."""
-    if not CONFIG_PATH.exists():
+    path = config_path()
+    if not path.exists():
         return {}
     try:
-        with open(CONFIG_PATH) as f:
+        with open(path) as f:
             data = yaml.safe_load(f) or {}
-        return data
+        return data if isinstance(data, dict) else {}
     except Exception:
         return {}
 
 
 def save(config: Dict[str, Any]) -> None:
     """Save radio config to disk."""
-    _ensure_dir()
-    with open(CONFIG_PATH, "w") as f:
+    with open(config_path(), "w") as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
 
 
 def get_decades() -> Set[int]:
-    """Get saved active decades."""
     cfg = load()
     decades = cfg.get("decades")
     if decades and isinstance(decades, list):
@@ -137,21 +129,14 @@ def get_decade_weights() -> Dict[int, float]:
 
 
 def get_recent_stations() -> List[Dict[str, Any]]:
-    """Get recently listened stations (most recent first, max 10)."""
+    """Recently listened stations, most recent first, max 10."""
     return load().get("recent_stations", [])
 
 
 def add_recent_station(name: str, url: str, source: str = "stream") -> None:
     """Add a station to recently listened. Deduplicates by URL."""
     cfg = load()
-    recent = cfg.get("recent_stations", [])
-
-    # Remove existing entry with same URL
-    recent = [s for s in recent if s.get("url") != url]
-
-    # Add to front
+    recent = [s for s in cfg.get("recent_stations", []) if s.get("url") != url]
     recent.insert(0, {"name": name, "url": url, "source": source})
-
-    # Keep max 10
     cfg["recent_stations"] = recent[:10]
     save(cfg)

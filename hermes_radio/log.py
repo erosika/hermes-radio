@@ -1,48 +1,46 @@
-"""Radio-specific logging.
-
-Writes structured, human-readable logs to ~/.hermes/radio/radio.log.
-Separate from the main hermes log so radio activity doesn't drown
-in tool/agent noise.
+"""Radio log at ``$HERMES_HOME/radio/radio.log``.
 
 Format:
   16:08:18  PLAY   Mamman Sani -- Bodo  [1980s NER weird]
   16:08:22  LEVEL  ffmpeg meter started
   16:12:09  SKIP   user skip
-  16:12:10  PLAY   Black Sugar -- Viajecito  [1970s PER weird]
-  16:15:30  MIC    "That was Black Sugar from Lima..."
-  16:15:45  END    track finished naturally
   16:20:00  STOP   radio stopped
 """
 
 import logging
-import os
-from datetime import datetime
 from pathlib import Path
 
-RADIO_LOG_DIR = Path(os.path.expanduser("~/.hermes/radio"))
-RADIO_LOG_FILE = RADIO_LOG_DIR / "radio.log"
+from . import paths
 
+_FORMAT = logging.Formatter("%(asctime)s  %(message)s", datefmt="%H:%M:%S")
 _logger = None
+_logger_path = None
+
+
+def log_path() -> Path:
+    return paths.radio_dir() / "radio.log"
 
 
 def _get_logger() -> logging.Logger:
-    """Get or create the radio file logger."""
-    global _logger
-    if _logger is not None:
+    """Return the radio file logger, reopening it when HERMES_HOME changed."""
+    global _logger, _logger_path
+    path = log_path()
+    if _logger is not None and _logger_path == path:
         return _logger
 
-    RADIO_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    logger = logging.getLogger("hermes.radio")
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
+    handler = logging.FileHandler(path, encoding="utf-8")
+    handler.setFormatter(_FORMAT)
+    logger.addHandler(handler)
 
-    _logger = logging.getLogger("hermes.radio")
-    _logger.setLevel(logging.DEBUG)
-    _logger.propagate = False  # don't spam the root logger
-
-    # File handler with simple format
-    handler = logging.FileHandler(RADIO_LOG_FILE, encoding="utf-8")
-    handler.setFormatter(logging.Formatter("%(asctime)s  %(message)s", datefmt="%H:%M:%S"))
-    _logger.addHandler(handler)
-
-    return _logger
+    _logger = logger
+    _logger_path = path
+    return logger
 
 
 def play(artist: str, title: str, decade: int = 0, country: str = "", mood: str = "", source: str = "crate"):

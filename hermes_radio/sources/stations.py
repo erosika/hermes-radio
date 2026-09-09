@@ -1,27 +1,28 @@
-"""Curated station list loader.
+"""Curated station list. The bundled stations.yaml, overridden by the user's copy in the radio dir."""
 
-Loads from built-in radio/stations.yaml, overridden by user's
-~/.hermes/radio/stations.yaml if it exists.
-"""
-
-import os
 from pathlib import Path
 from typing import Any, Dict, List
 
 import yaml
 
+from .. import paths
+
 BUILTIN_PATH = Path(__file__).parent / "stations.yaml"
-USER_PATH = Path(os.path.expanduser("~/.hermes/radio/stations.yaml"))
+
+
+def user_path() -> Path:
+    return paths.radio_dir() / "stations.yaml"
 
 
 def load_stations() -> List[Dict[str, Any]]:
     """Load curated stations. User file overrides built-in."""
-    path = USER_PATH if USER_PATH.exists() else BUILTIN_PATH
+    user = user_path()
+    path = user if user.exists() else BUILTIN_PATH
     if not path.exists():
         return []
     try:
         with open(path) as f:
             data = yaml.safe_load(f) or {}
-        return data.get("stations", [])
+        return data.get("stations", []) if isinstance(data, dict) else []
     except Exception:
         return []

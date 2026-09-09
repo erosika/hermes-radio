@@ -1,0 +1,33 @@
+name: hermes-radio
+version: 0.2.0
+description: "Internet radio for Hermes. Curated stations, SomaFM, Radio Garden, Radiooooo crate digging, Radio Browser search. One detached mpv daemon shared by the agent tools, /radio, the classic-CLI wrapper (Ctrl+R), and the TUI dock widget."
+author: erosika
+kind: standalone
+homepage: https://github.com/erosika/hermes-radio
+license: MIT
+tags: [radio, music, audio, mpv]
+manifest_version: 2
+provides_tools:
+  - radio_play
+  - radio_pause
+  - radio_stop
+  - radio_skip
+  - radio_status
+  - radio_volume
+  - radio_mic_break
+  - radio_record
+  - radio_search
+python_dependencies:
+  - httpx
+  - pyyaml
+external_dependencies:
+  - name: mpv
+    install: "brew install mpv"
+    check: "mpv --version"
+  - name: ffmpeg
+    install: "brew install ffmpeg"
+    check: "ffmpeg -version"
+config_schema:
+  hermes_root:
+    type: str
+    description: "Path to a hermes-agent checkout the daemon imports for mic-break TTS and LLM commentary. Defaults to the running Hermes."

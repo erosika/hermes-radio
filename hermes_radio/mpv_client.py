@@ -13,7 +13,6 @@ import shutil
 import signal
 import subprocess
 import tempfile
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -230,8 +229,8 @@ class MpvClient:
         paused = await self.get_property("pause")
         await self.command("set_property", "pause", not paused)
 
-    async def stop(self) -> None:
-        """Stop playback (clear playlist)."""
+    async def stop_playback(self) -> None:
+        """Stop playback and clear the playlist. mpv keeps running."""
         await self.command("stop")
 
     async def playlist_next(self) -> None:

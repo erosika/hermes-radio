@@ -15,8 +15,8 @@ import math
 import time
 from typing import Dict, List, Tuple
 
-from radio.level_meter import VisualizerFeatures, get_feature_snapshot
-from radio.visualizers import load_preset
+from ..level_meter import VisualizerFeatures, get_feature_snapshot
+from . import load_preset
 
 _BRAILLE_DENSITY = " ⠁⠃⠇⠏⠟⠿⣿"
 _BLOCKS = " ▁▂▃▄▅▆▇█"
@@ -165,8 +165,8 @@ def _synthetic_snapshot(width: int, position: float, title_seed: str) -> Visuali
     )
 
 
-def _resolve_features(width: int, position: float, title_seed: str) -> VisualizerFeatures:
-    snapshot = get_feature_snapshot(width)
+def _resolve_features(width: int, position: float, title_seed: str, features: VisualizerFeatures | None = None) -> VisualizerFeatures:
+    snapshot = features if features is not None else get_feature_snapshot(width)
     if snapshot.active and snapshot.energy > 0.05:
         return snapshot
     return _synthetic_snapshot(width, position, title_seed)
@@ -578,8 +578,17 @@ def _compose_scene(scene: str, grid: TerminalGrid, levels: List[float], features
     return _scene_bars(grid, levels, features, state, detail)
 
 
-def render_rows(*, preset_name: str | None, width: int, rows: int, paused: bool, position: float, title_seed: str) -> List[str]:
-    """Render terminal visualizer rows for the active or requested preset."""
+def render_rows(
+    *,
+    preset_name: str | None,
+    width: int,
+    rows: int,
+    paused: bool,
+    position: float,
+    title_seed: str,
+    features: VisualizerFeatures | None = None,
+) -> List[str]:
+    """Render visualizer rows. ``features`` comes from the caller (state.json) or the in-process meter when None."""
     width = max(1, width)
     rows = max(1, rows)
     preset = load_preset(preset_name)
@@ -589,7 +598,7 @@ def render_rows(*, preset_name: str | None, width: int, rows: int, paused: bool,
     now = time.time()
     dt = min(now - state.last_render, 0.5) if state.last_render else 0.25
 
-    features = _resolve_features(max(width, 16), position, title_seed)
+    features = _resolve_features(max(width, 16), position, title_seed, features)
     levels = _resample_levels(features.levels, width)
     levels = _apply_center_boost(levels, float(preset.get("center_boost", 0.0)))
     state.previous_levels = list(state.levels) if state.levels else [0.0] * len(levels)

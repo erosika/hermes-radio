@@ -1,18 +1,7 @@
 """Radio listening history and track/mic break archival.
 
-All features are optional and gated on config flags:
-  ~/.hermes/radio/config.yaml:
-    history: true        # log tracks to history.jsonl
-    save_tracks: true    # download MP3s to tracks/
-    save_mic_breaks: true # save commentary text + audio to mic_breaks/
-    honcho_sync: true    # push listening sessions to Honcho
-
-Directory structure:
-  ~/.hermes/radio/
-    config.yaml
-    history.jsonl          # one JSON object per line
-    tracks/                # downloaded MP3s with metadata
-    mic_breaks/            # commentary text + audio files
+Every feature is off unless its flag is set in config.yaml: ``history``,
+``save_tracks``, ``save_mic_breaks``, ``honcho_sync``.
 """
 
 import json
@@ -24,23 +13,29 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from . import paths
+from .config import load as _load_config
+
 logger = logging.getLogger(__name__)
 
-RADIO_DIR = Path(os.path.expanduser("~/.hermes/radio"))
-HISTORY_FILE = RADIO_DIR / "history.jsonl"
-TRACKS_DIR = RADIO_DIR / "tracks"
-MIC_BREAKS_DIR = RADIO_DIR / "mic_breaks"
+_honcho_warned = False
 
 
-def _ensure_dirs():
-    RADIO_DIR.mkdir(parents=True, exist_ok=True)
+def history_file() -> Path:
+    return paths.radio_dir() / "history.jsonl"
+
+
+def tracks_dir() -> Path:
+    return paths.radio_dir() / "tracks"
+
+
+def mic_breaks_dir() -> Path:
+    return paths.radio_dir() / "mic_breaks"
 
 
 def _config_flag(key: str, default: bool = False) -> bool:
-    """Read a boolean flag from radio config."""
     try:
-        from radio.config import load
-        return load().get(key, default)
+        return bool(_load_config().get(key, default))
     except Exception:
         return default
 
@@ -62,8 +57,6 @@ def log_track(
     if not _config_flag("history"):
         return
 
-    _ensure_dirs()
-
     entry = {
         "type": "track",
         "timestamp": datetime.now().isoformat(),
@@ -80,7 +73,7 @@ def log_track(
     }
 
     try:
-        with open(HISTORY_FILE, "a") as f:
+        with open(history_file(), "a") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception:
         logger.debug("Failed to write history", exc_info=True)
@@ -96,8 +89,6 @@ def log_mic_break(
     if not _config_flag("history"):
         return
 
-    _ensure_dirs()
-
     entry = {
         "type": "mic_break",
         "timestamp": datetime.now().isoformat(),
@@ -109,7 +100,7 @@ def log_mic_break(
     }
 
     try:
-        with open(HISTORY_FILE, "a") as f:
+        with open(history_file(), "a") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception:
         logger.debug("Failed to write mic break history", exc_info=True)
@@ -124,8 +115,6 @@ def log_station(
     if not _config_flag("history"):
         return
 
-    _ensure_dirs()
-
     entry = {
         "type": "station",
         "timestamp": datetime.now().isoformat(),
@@ -136,7 +125,7 @@ def log_station(
     }
 
     try:
-        with open(HISTORY_FILE, "a") as f:
+        with open(history_file(), "a") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception:
         logger.debug("Failed to write station history", exc_info=True)
@@ -144,10 +133,11 @@ def log_station(
 
 def get_history(limit: int = 50) -> list:
     """Read the last N history entries."""
-    if not HISTORY_FILE.exists():
+    path = history_file()
+    if not path.exists():
         return []
     try:
-        lines = HISTORY_FILE.read_text().strip().split("\n")
+        lines = path.read_text().strip().split("\n")
         entries = [json.loads(line) for line in lines if line.strip()]
         return entries[-limit:]
     except Exception:
@@ -157,22 +147,19 @@ def get_history(limit: int = 50) -> list:
 # -- Track saving -----------------------------------------------------------
 
 def save_track(url: str, artist: str, title: str, decade: int = 0, country: str = "", mood: str = "") -> Optional[str]:
-    """Download and save a track MP3 to ~/.hermes/radio/tracks/.
-
-    Returns the saved file path, or None if saving is disabled/failed.
-    """
+    """Download a track MP3 into tracks/. Returns the path, or None when disabled or failed."""
     if not _config_flag("save_tracks"):
         return None
 
-    _ensure_dirs()
-    TRACKS_DIR.mkdir(parents=True, exist_ok=True)
+    tracks = tracks_dir()
+    tracks.mkdir(parents=True, exist_ok=True)
 
     # Build filename
     safe_artist = _safe_filename(artist)
     safe_title = _safe_filename(title)
     date_str = datetime.now().strftime("%Y%m%d")
     filename = f"{date_str}_{safe_artist}_{safe_title}.mp3"
-    filepath = TRACKS_DIR / filename
+    filepath = tracks / filename
 
     if filepath.exists():
         return str(filepath)
@@ -224,18 +211,15 @@ def _tag_track(filepath: Path, artist: str, title: str, decade: int, country: st
 # -- Mic break saving -------------------------------------------------------
 
 def save_mic_break(commentary: str, audio_path: Optional[str] = None) -> Optional[str]:
-    """Save mic break commentary and audio to ~/.hermes/radio/mic_breaks/.
-
-    Returns the saved text file path, or None.
-    """
+    """Save mic break text and audio into mic_breaks/. Returns the text path, or None."""
     if not _config_flag("save_mic_breaks"):
         return None
 
-    _ensure_dirs()
-    MIC_BREAKS_DIR.mkdir(parents=True, exist_ok=True)
+    out_dir = mic_breaks_dir()
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    text_path = MIC_BREAKS_DIR / f"{ts}.txt"
+    text_path = out_dir / f"{ts}.txt"
 
     try:
         text_path.write_text(commentary, encoding="utf-8")
@@ -243,7 +227,7 @@ def save_mic_break(commentary: str, audio_path: Optional[str] = None) -> Optiona
         # Copy audio file alongside the text
         if audio_path and os.path.exists(audio_path):
             ext = Path(audio_path).suffix or ".mp3"
-            audio_dest = MIC_BREAKS_DIR / f"{ts}{ext}"
+            audio_dest = out_dir / f"{ts}{ext}"
             shutil.copy2(audio_path, audio_dest)
 
         return str(text_path)
@@ -255,12 +239,20 @@ def save_mic_break(commentary: str, audio_path: Optional[str] = None) -> Optiona
 # -- Honcho sync ------------------------------------------------------------
 
 def sync_to_honcho(track_info: Dict[str, Any]) -> None:
-    """Push a track play event to Honcho for cross-session recall."""
+    """Push a track play event to Honcho. Needs the hermes-agent ``tools`` package on sys.path."""
+    global _honcho_warned
     if not _config_flag("honcho_sync"):
         return
 
     try:
         from tools.honcho_tools import honcho_conclude_tool
+    except Exception:
+        if not _honcho_warned:
+            _honcho_warned = True
+            logger.info("Honcho sync unavailable: tools.honcho_tools is not importable")
+        return
+
+    try:
         summary = (
             f"Listened to {track_info.get('artist', '?')} - {track_info.get('title', '?')} "
             f"({track_info.get('decade', '')}s, {track_info.get('country', '')}, {track_info.get('mood', '')})"

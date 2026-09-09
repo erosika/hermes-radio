@@ -1,23 +1,32 @@
-"""Hermes Radio player orchestrator.
+"""Hermes Radio engine: mpv, sources, crate digging, mic breaks, recording.
 
-Manages the dual-mpv pattern (primary + voice), source switching,
-crate-dig loop, and mic break scheduling.  Designed to run as a
-background service within the Hermes CLI process.
+The daemon holds one instance and dispatches every protocol method to the same-named coroutine here.
 """
 
 import asyncio
 import json
 import logging
-import shutil
+import os
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from radio.mpv_client import MpvClient
+from . import config as radio_config
+from . import history, level_meter, paths
+from . import log as radio_log
+from .mpv_client import MpvClient
+from .sources.radio_browser import RadioBrowserClient
+from .sources.radio_garden import RadioGardenClient
+from .sources.radiooooo import RadioooooClient
+from .sources.somafm import get_channel, get_channels, get_featured
+from .sources.stations import load_stations
 
 logger = logging.getLogger(__name__)
+
+STATE_VERSION = 1
 
 
 def _station_name_from_url(url: str) -> str:
@@ -26,27 +35,20 @@ def _station_name_from_url(url: str) -> str:
     parsed = urlparse(url)
     hostname = parsed.hostname or ""
 
-    # Radio Garden: /listen/station-name/ID/channel.mp3
-    # The station name slug is only present in long-form URLs.
-    # Short URLs like /listen/43U_hUSz/channel.mp3 only have the ID.
+    # Radio Garden long URLs carry a name slug after /listen/; short ones only an ID.
     if "radio.garden" in hostname:
         parts = [p for p in parsed.path.split("/") if p and p != "channel.mp3"]
-        # Find the slug after "listen" -- skip if it looks like an ID (short, alphanumeric)
         for i, p in enumerate(parts):
             if p == "listen" and i + 1 < len(parts):
                 slug = parts[i + 1]
-                # If slug has hyphens and is > 10 chars, it's a name not an ID
                 if len(slug) > 10 or "-" in slug:
                     return slug.replace("-", " ").title()
-        # Couldn't extract name -- return generic
         return "Radio Garden"
 
-    # SomaFM: ice2.somafm.com/defcon-256-mp3 -> defcon
     if "somafm.com" in hostname:
         path = parsed.path.strip("/").split("-")[0]
         return f"SomaFM {path}" if path else "SomaFM"
 
-    # Generic: use hostname or last path segment
     path = parsed.path.strip("/").split("/")[-1]
     if path and path not in ("stream", "channel.mp3", ""):
         return path.replace("-", " ").replace("_", " ").title()
@@ -55,14 +57,14 @@ def _station_name_from_url(url: str) -> str:
 
 
 class SourceMode(str, Enum):
-    CRATE = "crate"       # Radiooooo track-by-track
-    STREAM = "stream"     # Live radio (Radio Browser, SomaFM, Radio Garden, custom)
-    LOCAL = "local"       # Local files
+    CRATE = "crate"
+    STREAM = "stream"
+    LOCAL = "local"
 
 
 @dataclass
 class NowPlaying:
-    """Snapshot of the current playback state for display."""
+    """Current playback state."""
     active: bool = False
     source_mode: str = ""
     title: str = ""
@@ -72,24 +74,28 @@ class NowPlaying:
     mood: str = ""
     position: Optional[float] = None
     duration: Optional[float] = None
-    volume: float = 55.0
+    volume: float = 80.0
     paused: bool = False
     station_name: str = ""
-    # History for mic break context
     recent_tracks: List[Dict[str, str]] = field(default_factory=list)
 
 
 class HermesRadio:
-    """Main radio player.  Singleton within a Hermes CLI process."""
-
-    _instance: Optional["HermesRadio"] = None
+    """The radio engine. The daemon owns exactly one."""
 
     def __init__(self):
-        self._primary = MpvClient(label="main")
-        self._voice = MpvClient(label="voice")
+        # Per-home socket paths so two Hermes homes on one machine never share an mpv.
+        radio_dir = paths.radio_dir()
+        self._primary = MpvClient(socket_path=str(radio_dir / "mpv-main.sock"), label="main")
+        self._voice = MpvClient(socket_path=str(radio_dir / "mpv-voice.sock"), label="voice")
         self._source_mode: SourceMode = SourceMode.CRATE
         self._now = NowPlaying()
+        try:
+            self._now.volume = float(radio_config.get_volume())
+        except Exception:
+            pass
         self._crate_task: Optional[asyncio.Task] = None
+        self._skip_event: Optional[asyncio.Event] = None
         self._mic_break_active = False
         self._auto_mic_breaks = True
         self._mic_break_persona = "encyclopedic"
@@ -99,87 +105,69 @@ class HermesRadio:
         self._break_every_n = 3
         self._running = False
         self._on_state_change: Optional[Callable] = None
-        # Radiooooo client (lazy init)
-        self._radiooooo = None
-        # Crate dig config
+        self._radiooooo: Optional[RadioooooClient] = None
         self._crate_decades: Optional[List[int]] = None
         self._crate_moods: Optional[List[str]] = None
         self._crate_country: Optional[str] = None
         self._crate_weighted = True
-        # Weight overrides (None = use module defaults)
         self._mood_weights: Optional[Dict[str, float]] = None
         self._country_weights: Optional[Dict[str, float]] = None
         self._decade_weights: Optional[Dict[int, float]] = None
-        # State poll task (created in start())
-        self._state_poll_task = None
+        self._state_poll_task: Optional[asyncio.Task] = None
         self._muted = False
-        self._pre_mute_volume = 55.0
-
-    @classmethod
-    def get(cls) -> "HermesRadio":
-        """Get or create the singleton instance."""
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
-
-    @classmethod
-    def active(cls) -> bool:
-        """Check if the radio is currently active (without creating an instance)."""
-        return cls._instance is not None and cls._instance._running
+        self._pre_mute_volume = self._now.volume
+        self._recording_path = ""
+        self._last_icy_raw = ""
+        self._unavailable_logged: set = set()
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
+    @property
+    def running(self) -> bool:
+        return self._running
+
     async def start(self) -> None:
-        """Start the primary mpv instance."""
+        """Spawn the primary mpv and begin polling it."""
         if self._running:
             return
         await self._primary.start()
 
-        # Listen for track-end events
         self._primary.on("end-file", self._on_track_end)
         self._primary.on("metadata-update", self._on_metadata_update)
-
-        # Observe metadata changes
         await self._primary.observe_property(1, "media-title")
         await self._primary.observe_property(2, "metadata")
 
         self._running = True
-
-        # Apply configured default volume
         await self._primary.set_volume(self._now.volume)
 
         self._state_poll_task = asyncio.create_task(self._poll_state())
         self._notify_state_change()
-        try:
-            from radio.log import info
-            info("radio started")
-        except Exception:
-            pass
+        radio_log.info("radio started")
         logger.info("Hermes Radio started")
 
-    async def stop(self) -> None:
-        """Stop everything and clean up."""
+    async def stop(self) -> str:
+        """Stop playback, kill both mpv processes and the meter."""
+        was_running = self._running
         self._running = False
 
-        for task in (self._crate_task, getattr(self, "_state_poll_task", None)):
+        for task in (self._crate_task, self._state_poll_task):
             if task and not task.done():
                 task.cancel()
                 try:
                     await task
                 except asyncio.CancelledError:
                     pass
+        self._crate_task = None
+        self._state_poll_task = None
 
         await self._primary.stop()
-
         if self._voice.running:
             await self._voice.stop()
 
-        # Stop level meter
         try:
-            from radio.level_meter import stop as stop_meter
-            stop_meter()
+            level_meter.stop()
         except Exception:
             pass
 
@@ -187,10 +175,15 @@ class HermesRadio:
             await self._radiooooo.close()
             self._radiooooo = None
 
-        self._now = NowPlaying()
+        volume = self._now.volume
+        self._now = NowPlaying(volume=volume)
+        self._recording_path = ""
+        self._muted = False
         self._notify_state_change()
-        HermesRadio._instance = None
-        logger.info("Hermes Radio stopped")
+        if was_running:
+            radio_log.stop("radio stopped")
+            logger.info("Hermes Radio stopped")
+        return "Radio stopped"
 
     # ------------------------------------------------------------------
     # Playback control
@@ -198,33 +191,36 @@ class HermesRadio:
 
     async def play_stream(self, url: str, station_name: str = "") -> str:
         """Play a live radio stream URL."""
+        if not url:
+            raise ValueError("Provide a stream URL")
         if not self._running:
             await self.start()
         self._cancel_crate()
         self._source_mode = SourceMode.STREAM
         self._now.source_mode = "stream"
 
-        # Derive a station name if none provided
         if not station_name:
             station_name = _station_name_from_url(url)
 
-        # Stop any active recording before switching (saves the file)
+        # Switching stations closes the current recording so the file is saved.
         if self.is_recording:
-            result = await self.stop_recording()
-            print(f"  {result}")
+            radio_log.info(await self.stop_recording())
 
         self._now.station_name = station_name
+        self._now.title = ""
+        self._now.artist = ""
+        self._now.decade = 0
+        self._now.country = ""
+        self._now.mood = ""
         self._now.active = True
         await self._primary.loadfile(url)
+        radio_log.stream(station_name, url)
 
-        # Start level meter for reactive visualizer
         try:
-            from radio.level_meter import start as start_meter
-            start_meter(url)
+            level_meter.start(url)
         except Exception:
-            pass
+            logger.debug("level meter failed to start", exc_info=True)
 
-        # After a short delay, try to get a better name from mpv metadata
         async def _update_name():
             await asyncio.sleep(2)
             try:
@@ -233,23 +229,57 @@ class HermesRadio:
                     if not self._now.station_name or self._now.station_name == _station_name_from_url(url):
                         self._now.station_name = title
                         self._notify_state_change()
-                        # Update recent with the real name
-                        from radio.config import add_recent_station
-                        add_recent_station(title, url, source="stream")
+                        radio_config.add_recent_station(title, url, source="stream")
             except Exception:
                 pass
         asyncio.create_task(_update_name())
 
-        # Log station to history
         try:
-            from radio.history import log_station
-            log_station(station_name=station_name, url=url, source="stream")
-            from radio.config import add_recent_station
-            add_recent_station(station_name, url, source="stream")
+            history.log_station(station_name=station_name, url=url, source="stream")
+            radio_config.add_recent_station(station_name, url, source="stream")
         except Exception:
-            pass
+            logger.debug("history write failed", exc_info=True)
         self._notify_state_change()
         return f"Tuned to {station_name}"
+
+    async def play_station(self, query: str) -> str:
+        """Play by name: curated list substring, then Radio Browser by name, then by tag."""
+        q = (query or "").strip()
+        if not q:
+            raise ValueError("Provide a station name or URL")
+        if q.startswith(("http://", "https://")):
+            return await self.play_stream(q)
+
+        ql = q.lower()
+        for station in load_stations():
+            name = str(station.get("name", ""))
+            url = str(station.get("url", ""))
+            if url and ql in name.lower():
+                return await self.play_stream(url, station_name=name)
+
+        client = RadioBrowserClient()
+        try:
+            stations = await client.search(name=q, limit=1)
+            if not stations:
+                stations = await client.search(tag=q, limit=1)
+        finally:
+            await client.close()
+        if not stations:
+            raise LookupError(f"No stations found for: {query}")
+        station = stations[0]
+        return await self.play_stream(station.stream_url, station_name=station.name)
+
+    async def play_somafm(self, channel_id: str = "") -> Any:
+        """Play a SomaFM channel, or list the featured channels when ``channel_id`` is empty."""
+        if not channel_id:
+            channels = await get_featured()
+            return {"channels": [{"id": ch.id, "title": ch.title, "genre": ch.genre} for ch in channels]}
+        ch = await get_channel(channel_id)
+        if not ch:
+            raise LookupError(f"SomaFM channel not found: {channel_id}")
+        if not ch.stream_url:
+            raise LookupError(f"No stream URL for channel: {channel_id}")
+        return await self.play_stream(ch.stream_url, station_name=f"SomaFM {ch.title}")
 
     async def play_crate(
         self,
@@ -271,19 +301,22 @@ class HermesRadio:
         self._now.station_name = "Crate Digger"
         self._now.active = True
 
-        # Dig the first track
         track = await self._dig_track()
         if not track:
             return "No tracks found for those criteria"
 
         await self._play_track(track)
-        # Start the crate loop
         self._crate_task = asyncio.create_task(self._crate_loop())
         self._notify_state_change()
         return f"Digging: {track.display}"
 
     async def play_local(self, path: str) -> str:
         """Play a local file or directory."""
+        if not path:
+            raise ValueError("Provide a file or directory path")
+        p = Path(path).expanduser().resolve()
+        if not p.exists():
+            raise LookupError(f"Not found: {path}")
         if not self._running:
             await self.start()
         self._cancel_crate()
@@ -292,9 +325,7 @@ class HermesRadio:
         self._now.station_name = ""
         self._now.active = True
 
-        p = Path(path).expanduser().resolve()
         if p.is_dir():
-            # Queue all audio files
             exts = {".mp3", ".flac", ".ogg", ".wav", ".m4a", ".aac", ".opus", ".wma", ".webm"}
             files = sorted(f for f in p.rglob("*") if f.suffix.lower() in exts)
             if not files:
@@ -304,38 +335,46 @@ class HermesRadio:
                 await self._primary.loadfile(str(f), mode="append")
             self._notify_state_change()
             return f"Playing {len(files)} tracks from {p.name}"
-        elif p.is_file():
-            await self._primary.loadfile(str(p))
-            self._notify_state_change()
-            return f"Playing {p.name}"
-        else:
-            return f"Not found: {path}"
+        await self._primary.loadfile(str(p))
+        self._notify_state_change()
+        return f"Playing {p.name}"
 
     async def skip(self) -> str:
         """Skip to the next track."""
+        if not self._running:
+            return "Radio is not playing"
         if self._mic_break_active:
             await self._abort_mic_break()
         if self._source_mode == SourceMode.CRATE:
-            # Signal the crate loop to advance via the skip event
-            if hasattr(self, '_skip_event') and self._skip_event:
+            if self._skip_event:
                 self._skip_event.set()
+            radio_log.skip()
             return "Skipping..."
-        else:
-            try:
-                await self._primary.playlist_next()
-                return "Skipped"
-            except Exception:
-                return "Nothing to skip to"
+        try:
+            await self._primary.playlist_next()
+            radio_log.skip()
+            return "Skipped"
+        except Exception:
+            return "Nothing to skip to"
 
     async def toggle_pause(self) -> str:
+        if not self._running:
+            return "Radio is not playing"
         await self._primary.toggle_pause()
         paused = await self._primary.is_paused()
         self._now.paused = paused
+        radio_log.pause(paused)
         self._notify_state_change()
         return "Paused" if paused else "Playing"
 
     async def set_volume(self, level: float) -> str:
-        await self._primary.set_volume(level)
+        try:
+            level = float(level)
+        except (TypeError, ValueError):
+            raise ValueError(f"Volume must be a number, got {level!r}")
+        level = max(0.0, min(100.0, level))
+        if self._running:
+            await self._primary.set_volume(level)
         self._now.volume = level
         self._muted = level <= 0
         if level > 0:
@@ -343,73 +382,17 @@ class HermesRadio:
         self._notify_state_change()
         return f"Volume: {int(level)}%"
 
-    async def start_recording(self, path: str = "") -> str:
-        """Start recording the current stream to disk."""
-        if not self._running:
-            return "Radio is not playing"
-
-        if not path:
-            import os
-            from datetime import datetime
-            rec_dir = os.path.expanduser("~/.hermes/radio/recordings")
-            os.makedirs(rec_dir, exist_ok=True)
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-            # Build a meaningful name from station + track
-            name_parts = []
-            station = self._now.station_name or ""
-            title = self._now.title or ""
-            # Skip ID-like names (short alphanumeric, no spaces)
-            if station and (len(station) > 10 or " " in station):
-                name_parts.append(station)
-            if title and title != station:
-                name_parts.append(title)
-            if not name_parts:
-                name_parts.append(self._source_mode.value)
-
-            raw_name = " - ".join(name_parts)
-            # Sanitize: keep alphanumeric, spaces->underscores, strip non-ASCII
-            safe = "".join(c for c in raw_name if c.isascii() and (c.isalnum() or c in " -_"))
-            safe = safe.strip().replace(" ", "_")[:60] or "recording"
-            path = os.path.join(rec_dir, f"{ts}_{safe}.mp3")
-
-        try:
-            await self._primary.set_property("stream-record", path)
-            self._recording_path = path
-            try:
-                from radio.log import info
-                info(f"recording started: {path}")
-            except Exception:
-                pass
-            return f"Recording to {path}"
-        except Exception as e:
-            return f"Recording failed: {e}"
-
-    async def stop_recording(self) -> str:
-        """Stop recording the current stream."""
-        try:
-            await self._primary.set_property("stream-record", "")
-            path = getattr(self, '_recording_path', '')
-            self._recording_path = ""
-            try:
-                from radio.log import info
-                info(f"recording stopped: {path}")
-            except Exception:
-                pass
-            return f"Recording saved: {path}" if path else "Recording stopped"
-        except Exception as e:
-            return f"Stop recording failed: {e}"
-
-    @property
-    def is_recording(self) -> bool:
-        return bool(getattr(self, '_recording_path', ''))
-
     async def adjust_volume(self, delta: float) -> str:
-        current = await self._primary.get_volume()
-        new_vol = max(0, min(100, current + delta))
-        return await self.set_volume(new_vol)
+        try:
+            delta = float(delta)
+        except (TypeError, ValueError):
+            raise ValueError(f"Volume delta must be a number, got {delta!r}")
+        current = await self._primary.get_volume() if self._running else self._now.volume
+        return await self.set_volume(max(0.0, min(100.0, current + delta)))
 
     async def toggle_mute(self) -> str:
+        if not self._running:
+            return "Radio is not playing"
         current = await self._primary.get_volume()
         if self._muted or current <= 0:
             restore = self._pre_mute_volume if self._pre_mute_volume > 0 else 50.0
@@ -427,27 +410,160 @@ class HermesRadio:
         return "Muted"
 
     # ------------------------------------------------------------------
+    # Recording
+    # ------------------------------------------------------------------
+
+    def _default_recording_path(self) -> str:
+        rec_dir = paths.radio_dir() / "recordings"
+        rec_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        name_parts = []
+        station = self._now.station_name or ""
+        title = self._now.title or ""
+        # Short alphanumeric station names are usually IDs, not names.
+        if station and (len(station) > 10 or " " in station):
+            name_parts.append(station)
+        if title and title != station:
+            name_parts.append(title)
+        if not name_parts:
+            name_parts.append(self._source_mode.value)
+
+        raw_name = " - ".join(name_parts)
+        safe = "".join(c for c in raw_name if c.isascii() and (c.isalnum() or c in " -_"))
+        safe = safe.strip().replace(" ", "_")[:60] or "recording"
+        return str(rec_dir / f"{ts}_{safe}.mp3")
+
+    async def start_recording(self, path: str = "") -> str:
+        """Record the current stream to disk via mpv's stream-record."""
+        if not self._running:
+            return "Radio is not playing"
+        if not path:
+            path = self._default_recording_path()
+        try:
+            await self._primary.set_property("stream-record", path)
+        except Exception as e:
+            return f"Recording failed: {e}"
+        self._recording_path = path
+        radio_log.info(f"recording started: {path}")
+        self._notify_state_change()
+        return f"Recording to {path}"
+
+    async def stop_recording(self) -> str:
+        if not self._recording_path:
+            return "Not recording"
+        path = self._recording_path
+        try:
+            if self._primary.running:
+                await self._primary.set_property("stream-record", "")
+        except Exception as e:
+            return f"Stop recording failed: {e}"
+        self._recording_path = ""
+        radio_log.info(f"recording stopped: {path}")
+        self._notify_state_change()
+        return f"Recording saved: {path}"
+
+    @property
+    def is_recording(self) -> bool:
+        return bool(self._recording_path)
+
+    # ------------------------------------------------------------------
+    # Discovery
+    # ------------------------------------------------------------------
+
+    async def search(self, query: str, source: str = "radio_browser") -> Dict[str, Any]:
+        """Search a source. Sources: radio_browser, somafm, radio_garden."""
+        query = (query or "").strip()
+        if source in ("radio_browser", "rb"):
+            client = RadioBrowserClient()
+            try:
+                stations = await client.search(name=query, limit=10)
+                if not stations:
+                    stations = await client.search(tag=query, limit=10)
+            finally:
+                await client.close()
+            return {
+                "results": [
+                    {"name": s.name, "country": s.country, "tags": s.tags,
+                     "bitrate": s.bitrate, "url": s.stream_url}
+                    for s in stations
+                ],
+            }
+
+        if source == "somafm":
+            channels = await get_channels()
+            q = query.lower()
+            matches = [
+                ch for ch in channels
+                if q in ch.title.lower() or q in ch.genre.lower() or q in ch.description.lower()
+            ]
+            return {
+                "results": [
+                    {"id": ch.id, "title": ch.title, "genre": ch.genre, "description": ch.description}
+                    for ch in matches[:10]
+                ],
+            }
+
+        if source in ("radio_garden", "rg"):
+            client = RadioGardenClient()
+            try:
+                stations = await client.explore(query, limit=10)
+            finally:
+                await client.close()
+            return {
+                "results": [
+                    {"name": s.title, "place": s.place, "country": s.country, "url": s.stream_url}
+                    for s in stations
+                ],
+            }
+
+        raise ValueError(f"Unknown search source: {source}")
+
+    async def stations(self) -> Dict[str, Any]:
+        """The curated station list."""
+        return {"stations": load_stations()}
+
+    # ------------------------------------------------------------------
     # State
     # ------------------------------------------------------------------
 
-    async def status(self) -> Dict[str, Any]:
-        """Return current playback state as a dict."""
-        if not self._running:
-            return {"active": False}
-        mpv_status = await self._primary.status()
+    def snapshot(self) -> Dict[str, Any]:
+        """The state.json dict described in docs/protocol.md."""
+        now = self._now
+        active = bool(self._running)
+        is_stream = active and now.source_mode == "stream"
+        levels = level_meter.get_levels(64) if active else []
         return {
-            "active": True,
-            "source_mode": self._source_mode.value,
-            "station_name": self._now.station_name,
-            **mpv_status,
+            "version": STATE_VERSION,
+            "pid": os.getpid(),
+            "updated_at": time.time(),
+            "active": active,
+            "paused": bool(now.paused) if active else False,
+            "muted": bool(self._muted) if active else False,
+            "source_mode": now.source_mode if active else "",
+            "station_name": now.station_name if active else "",
+            "title": now.title if active else "",
+            "artist": now.artist if active else "",
+            "decade": int(now.decade or 0) if active else 0,
+            "country": now.country if active else "",
+            "mood": now.mood if active else "",
+            "position": None if (not active or is_stream) else now.position,
+            "duration": None if (not active or is_stream) else now.duration,
+            "volume": int(round(now.volume)),
+            "recording": self.is_recording,
+            "recording_path": self._recording_path or None,
+            "levels": levels,
+            "meter_active": bool(active and level_meter.is_active()),
         }
 
+    async def status(self) -> Dict[str, Any]:
+        return self.snapshot()
+
     def now_playing(self) -> NowPlaying:
-        """Return the current NowPlaying snapshot (sync, for UI)."""
         return self._now
 
-    def set_state_callback(self, cb: Callable) -> None:
-        """Register a callback for state changes (for UI refresh)."""
+    def set_state_callback(self, cb: Optional[Callable]) -> None:
+        """Register a callback fired on every state change."""
         self._on_state_change = cb
 
     def _notify_state_change(self) -> None:
@@ -455,15 +571,14 @@ class HermesRadio:
             try:
                 self._on_state_change()
             except Exception:
-                pass
+                logger.debug("state callback failed", exc_info=True)
 
     # ------------------------------------------------------------------
     # Crate-dig internals
     # ------------------------------------------------------------------
 
-    async def _get_radiooooo(self):
+    async def _get_radiooooo(self) -> RadioooooClient:
         if self._radiooooo is None:
-            from radio.radiooooo import RadioooooClient
             self._radiooooo = RadioooooClient()
         return self._radiooooo
 
@@ -486,18 +601,11 @@ class HermesRadio:
             logger.warning("Track has no audio URL: %s", track.id)
             return
         await self._primary.loadfile(url)
-        # Start level meter for reactive visualizer
         try:
-            from radio.level_meter import start as start_meter
-            start_meter(url)
+            level_meter.start(url)
         except Exception:
-            pass
-        # Log to radio.log
-        try:
-            from radio.log import play as log_play
-            log_play(track.artist, track.title, track.decade, track.country, track.mood)
-        except Exception:
-            pass
+            logger.debug("level meter failed to start", exc_info=True)
+        radio_log.play(track.artist, track.title, track.decade, track.country, track.mood)
         self._now.title = track.title
         self._now.artist = track.artist
         self._now.decade = track.decade
@@ -505,7 +613,6 @@ class HermesRadio:
         self._now.mood = track.mood
         self._now.paused = False
 
-        # Add to in-memory history (for LLM context)
         self._now.recent_tracks.append({
             "title": track.title,
             "artist": track.artist,
@@ -516,33 +623,28 @@ class HermesRadio:
         if len(self._now.recent_tracks) > 10:
             self._now.recent_tracks = self._now.recent_tracks[-10:]
 
-        # Persist: history log, track download, honcho sync (all optional)
         try:
-            from radio.history import log_track, save_track, sync_to_honcho
-            log_track(
+            history.log_track(
                 artist=track.artist, title=track.title, source="crate",
                 decade=track.decade, country=track.country, mood=track.mood,
                 duration=track.length, url=url,
             )
-            save_track(url, track.artist, track.title, track.decade, track.country, track.mood)
-            sync_to_honcho({
+            history.save_track(url, track.artist, track.title, track.decade, track.country, track.mood)
+            history.sync_to_honcho({
                 "artist": track.artist, "title": track.title,
                 "decade": track.decade, "country": track.country, "mood": track.mood,
             })
         except Exception:
-            pass
+            logger.debug("history write failed", exc_info=True)
 
         self._notify_state_change()
 
     async def _crate_loop(self) -> None:
-        """Background loop that keeps digging tracks."""
+        """Keep digging tracks until stopped or the source changes."""
         try:
             while self._running and self._source_mode == SourceMode.CRATE:
-                # Pre-fetch the next track while current plays
                 prefetch_task = asyncio.create_task(self._dig_track())
 
-                # Wait for track to end naturally (eof) or user skip.
-                # Two signals: end-file from mpv, or _skip_event from skip().
                 end_event = asyncio.Event()
                 self._skip_event = asyncio.Event()
                 load_time = time.monotonic()
@@ -550,15 +652,14 @@ class HermesRadio:
                 def on_end(data):
                     reason = data.get("reason", "")
                     if reason not in ("eof", "error"):
-                        return  # ignore "stop" -- only natural endings
-                    # Debounce: ignore events within 2s of load (loadfile cascade)
+                        return
+                    # loadfile fires a spurious end-file within ~2s of loading.
                     if time.monotonic() - load_time < 2.0:
                         return
                     end_event.set()
 
                 self._primary.on("end-file", on_end)
 
-                # Wait for either natural end or skip
                 wait_end = asyncio.create_task(end_event.wait())
                 wait_skip = asyncio.create_task(self._skip_event.wait())
                 try:
@@ -581,29 +682,22 @@ class HermesRadio:
                     prefetch_task.cancel()
                     break
 
-                # Get the prefetched track
                 try:
                     next_track = await prefetch_task
                 except asyncio.CancelledError:
                     break
 
                 if not next_track:
-                    # Retry with fresh params
                     next_track = await self._dig_track()
                     if not next_track:
                         logger.warning("Crate dig exhausted, stopping")
                         break
 
-                # Play the next track first, then mic break over it
                 await self._play_track(next_track)
 
-                # Short delay to let playback start before mic break
                 self._tracks_since_break += 1
-                if (
-                    self._auto_mic_breaks
-                    and self._tracks_since_break >= self._break_every_n
-                ):
-                    await asyncio.sleep(2.0)  # let the music establish
+                if self._auto_mic_breaks and self._tracks_since_break >= self._break_every_n:
+                    await asyncio.sleep(2.0)
                     await self._do_mic_break(next_track)
                     self._tracks_since_break = 0
 
@@ -615,83 +709,81 @@ class HermesRadio:
     def _cancel_crate(self) -> None:
         if self._crate_task and not self._crate_task.done():
             self._crate_task.cancel()
-            self._crate_task = None
+        self._crate_task = None
 
     # ------------------------------------------------------------------
     # Mic breaks
     # ------------------------------------------------------------------
 
     async def mic_break(self, text: Optional[str] = None) -> str:
-        """Trigger a mic break.  If text is given, use it.  Otherwise auto-generate."""
+        """Speak ``text``, or generate commentary when omitted."""
         if not self._running:
             return "Radio is not playing"
         if self._mic_break_active:
             return "Mic break already in progress"
 
         if text:
-            await self._speak(text)
-            return "Mic break done"
+            spoken = await self._speak(text)
         else:
-            await self._do_mic_break()
-            return "Mic break done"
+            spoken = await self._do_mic_break()
+        return "Mic break done" if spoken else "Mic breaks unavailable: Hermes TTS and LLM client not importable"
 
-    async def _do_mic_break(self, upcoming_track=None) -> None:
-        """Generate and play a mic break with volume ducking."""
+    async def _do_mic_break(self, upcoming_track=None) -> bool:
+        """Generate and play a mic break with volume ducking. Returns True when audio played."""
         if self._mic_break_active:
-            return
+            return False
 
         self._mic_break_active = True
         try:
-            # Generate commentary
             commentary = await self._generate_commentary(upcoming_track)
             if not commentary:
-                return
+                return False
 
             audio_path = await self._render_tts(commentary)
-            if audio_path:
-                await self._speak_audio(audio_path)
+            if not audio_path:
+                return False
+            radio_log.mic(commentary)
+            await self._speak_audio(audio_path)
 
-            # Save mic break (optional, gated on config)
             try:
-                from radio.history import log_mic_break, save_mic_break
-                log_mic_break(
+                history.log_mic_break(
                     commentary=commentary,
                     audio_path=audio_path,
                     track_artist=self._now.artist,
                     track_title=self._now.title,
                 )
-                save_mic_break(commentary, audio_path)
+                history.save_mic_break(commentary, audio_path)
             except Exception:
-                pass
+                logger.debug("mic break archive failed", exc_info=True)
+            return True
         except Exception:
             logger.exception("Mic break error")
+            return False
         finally:
             self._mic_break_active = False
 
-    async def _speak(self, text: str) -> None:
-        """TTS render + volume duck + play on voice instance."""
-        audio_path = await self._render_tts(text)
-        if not audio_path:
-            return
-        await self._speak_audio(audio_path)
+    async def _speak(self, text: str) -> bool:
+        self._mic_break_active = True
+        try:
+            audio_path = await self._render_tts(text)
+            if not audio_path:
+                return False
+            radio_log.mic(text)
+            await self._speak_audio(audio_path)
+            return True
+        finally:
+            self._mic_break_active = False
 
     async def _speak_audio(self, audio_path: str) -> None:
-        """Play a pre-rendered audio file with volume ducking."""
-        # Start voice mpv if needed
+        """Play a rendered clip on the voice mpv while ducking the music."""
         if not self._voice.running:
             await self._voice.start()
 
-        # Duck primary volume
-        await self._primary.ramp_volume(
-            self._duck_volume,
-            duration_ms=self._duck_ramp_ms,
-        )
+        await self._primary.ramp_volume(self._duck_volume, duration_ms=self._duck_ramp_ms)
 
-        # Play the TTS clip at reduced volume (DJ shouldn't overpower music)
         await self._voice.set_volume(65)
         await self._voice.loadfile(audio_path)
 
-        # Wait for the voice clip to finish
         voice_end = asyncio.Event()
 
         def on_voice_end(data):
@@ -706,39 +798,49 @@ class HermesRadio:
             if on_voice_end in self._voice._event_callbacks.get("end-file", []):
                 self._voice._event_callbacks["end-file"].remove(on_voice_end)
 
-        # Restore primary volume
-        await self._primary.ramp_volume(
-            self._now.volume,
-            duration_ms=self._duck_ramp_ms,
-        )
+        await self._primary.ramp_volume(self._now.volume, duration_ms=self._duck_ramp_ms)
 
     async def _abort_mic_break(self) -> None:
-        """Immediately stop a mic break and restore volume."""
         if self._voice.running:
             await self._voice.stop()
         await self._primary.set_volume(self._now.volume)
         self._mic_break_active = False
 
+    def _log_unavailable(self, key: str, message: str) -> None:
+        if key in self._unavailable_logged:
+            return
+        self._unavailable_logged.add(key)
+        radio_log.info(message)
+        logger.warning(message)
+
     async def _render_tts(self, text: str) -> Optional[str]:
-        """Render text to an audio file using Hermes' TTS tool."""
+        """Render text to audio with Hermes TTS. None when the tool is not importable."""
         try:
             from tools.tts_tool import text_to_speech_tool
-            result_json = text_to_speech_tool(text=text)
+        except Exception:
+            self._log_unavailable("tts", "mic breaks unavailable: tools.tts_tool not importable (set hermes_root)")
+            return None
+        try:
+            result_json = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: text_to_speech_tool(text=text)
+            )
             result = json.loads(result_json)
             if result.get("success"):
                 return result["file_path"]
-            else:
-                logger.warning("TTS failed: %s", result.get("error"))
-                return None
-        except ImportError:
-            logger.warning("TTS tool not available")
+            logger.warning("TTS failed: %s", result.get("error"))
             return None
         except Exception:
             logger.exception("TTS render error")
             return None
 
     async def _generate_commentary(self, upcoming_track=None) -> Optional[str]:
-        """Generate DJ commentary via the configured LLM."""
+        """Generate DJ commentary with the Hermes auxiliary LLM. None when it is not importable."""
+        try:
+            from agent.auxiliary_client import call_llm
+        except Exception:
+            self._log_unavailable("llm", "mic breaks unavailable: agent.auxiliary_client not importable (set hermes_root)")
+            return None
+
         now = self._now
         hour = time.localtime().tm_hour
         if hour < 6:
@@ -750,9 +852,8 @@ class HermesRadio:
         else:
             time_vibe = "evening"
 
-        # Build context
         current = f"{now.artist} - {now.title}" if now.title else "unknown"
-        history = "; ".join(
+        recent = "; ".join(
             f"{t['artist']} - {t['title']} ({t['decade']}s, {t['country']})"
             for t in now.recent_tracks[-5:]
         )
@@ -774,14 +875,12 @@ class HermesRadio:
 You're doing a mic break on Hermes Radio. It's {time_vibe}. Keep it to 1-3 sentences. Conversational, not scripted. Never mention being an AI. No hashtags.
 
 Just played: {current}
-Recent history: {history}{upcoming_info}
+Recent history: {recent}{upcoming_info}
 Source: {now.source_mode}"""
 
-        # Use Hermes' auxiliary LLM client
         try:
-            from agent.auxiliary_client import call_llm
             messages = [{"role": "user", "content": prompt}]
-            response = await asyncio.get_event_loop().run_in_executor(
+            response = await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: call_llm(
                     task="radio",
@@ -792,13 +891,11 @@ Source: {now.source_mode}"""
                 ),
             )
             text = response.choices[0].message.content
-            return text.strip() if text else None
-        except ImportError:
-            pass
+            if text and text.strip():
+                return text.strip()
         except Exception:
-            logger.debug("LLM commentary generation failed, using template")
+            logger.debug("LLM commentary generation failed, using template", exc_info=True)
 
-        # Fallback: simple template
         if upcoming_track:
             return f"That was {now.artist}. Coming up, {upcoming_track.artist} from the {upcoming_track.decade}s."
         return f"You're listening to Hermes Radio. That was {now.artist} -- {now.title}."
@@ -808,7 +905,7 @@ Source: {now.source_mode}"""
     # ------------------------------------------------------------------
 
     async def _poll_state(self) -> None:
-        """Background task that updates NowPlaying from mpv every ~300ms."""
+        """Refresh NowPlaying from mpv every ~300ms."""
         try:
             while self._running:
                 try:
@@ -818,16 +915,14 @@ Source: {now.source_mode}"""
                         self._now.volume = await self._primary.get_volume()
                         self._muted = self._now.volume <= 0
 
-                        # Poll ICY metadata for streams (catches title changes)
                         if self._source_mode == SourceMode.STREAM:
                             try:
                                 title = await self._primary.get_media_title()
-                                last_raw = getattr(self, '_last_icy_raw', '')
-                                if title and title != last_raw and title not in ("channel.mp3",):
+                                if title and title != self._last_icy_raw and title not in ("channel.mp3",):
                                     self._last_icy_raw = title
-                                    # For streams: store full ICY as title, no split
                                     self._now.title = title
                                     self._now.artist = ""
+                                    self._notify_state_change()
                             except Exception:
                                 pass
                 except Exception:
@@ -837,21 +932,18 @@ Source: {now.source_mode}"""
             pass
 
     def _on_track_end(self, data: dict) -> None:
-        """Handle track-end events from primary mpv."""
-        pass  # The crate loop handles this via its own listener
+        # The crate loop registers its own end-file listener.
+        pass
 
     def _on_metadata_update(self, data: dict) -> None:
-        """Handle metadata changes (ICY updates from live streams)."""
         if self._source_mode == SourceMode.STREAM:
             asyncio.create_task(self._refresh_stream_metadata())
 
     async def _refresh_stream_metadata(self) -> None:
-        """Pull fresh metadata from mpv after an ICY update."""
         try:
             title = await self._primary.get_media_title()
             if title and title != self._now.title:
                 self._now.title = title
-                # Try to split "Artist - Title" format
                 if " - " in title:
                     parts = title.split(" - ", 1)
                     self._now.artist = parts[0].strip()
@@ -867,12 +959,12 @@ Source: {now.source_mode}"""
     # ------------------------------------------------------------------
 
     def configure(self, config: dict) -> None:
-        """Apply radio config from ~/.hermes/config.yaml."""
+        """Apply the ``radio:`` section of the main Hermes config.yaml."""
         radio_cfg = config.get("radio", {})
         mic_cfg = radio_cfg.get("mic_breaks", {})
         crate_cfg = radio_cfg.get("crate", {})
 
-        self._now.volume = radio_cfg.get("default_volume", 55)
+        self._now.volume = radio_cfg.get("default_volume", self._now.volume)
         self._auto_mic_breaks = mic_cfg.get("enabled", True)
         self._mic_break_persona = mic_cfg.get("persona", "encyclopedic")
         self._duck_volume = mic_cfg.get("duck_volume", 20)
@@ -891,7 +983,6 @@ Source: {now.source_mode}"""
         self._crate_country = None
         self._crate_weighted = crate_cfg.get("weighted", True)
 
-        # Weight overrides from config
         mood_w = crate_cfg.get("mood_weights")
         if mood_w and isinstance(mood_w, dict):
             self._mood_weights = {str(k): float(v) for k, v in mood_w.items()}
@@ -903,8 +994,3 @@ Source: {now.source_mode}"""
         decade_w = crate_cfg.get("decade_weights")
         if decade_w and isinstance(decade_w, dict):
             self._decade_weights = {int(k): float(v) for k, v in decade_w.items()}
-
-
-def check_radio_available() -> bool:
-    """Check if mpv is installed."""
-    return shutil.which("mpv") is not None

@@ -1,27 +1,21 @@
-"""Audio level meter via ffmpeg sidecar.
+"""Audio level meter via an ffmpeg sidecar reading the same URL as mpv, output to ``-f null``.
 
-Runs a lightweight ffmpeg process that reads the same audio source as mpv
-and extracts per-frame RMS levels using the astats+ametadata filter chain.
-Writes levels to a shared list that the mini player reads.
-
-Uses no audio output (-f null) so it doesn't interfere with mpv playback.
-The bandwidth cost is minimal for most streams (MP3/OGG are small).
+The daemon publishes the last 64 normalized levels in state.json; clients call ``features_from_levels``.
 """
 
 from dataclasses import dataclass
 import logging
-import os
 import re
 import shutil
 import subprocess
 import threading
 from collections import deque
 from typing import Deque, List, Optional
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-# Shared state: ring buffer of recent RMS levels (dB, negative values)
-# Read by mini_player.py, written by the meter thread.
+# Ring buffer of raw RMS dB values, written by the meter thread.
 _levels: Deque[float] = deque(maxlen=64)
 _lock = threading.Lock()
 _process: Optional[subprocess.Popen] = None
@@ -127,36 +121,28 @@ def get_levels(n: int = 12) -> List[float]:
     return result
 
 
-def get_feature_snapshot(width: int, *, smoothing: float = 0.0) -> VisualizerFeatures:
-    """Return a compact feature snapshot for terminal visualizer rendering."""
+def _inactive_features(width: int) -> VisualizerFeatures:
+    return VisualizerFeatures(
+        levels=[0.0] * width,
+        energy=0.0,
+        peak=0.0,
+        transient=0.0,
+        motion=0.0,
+        decay=0.0,
+        active=False,
+    )
+
+
+def features_from_levels(levels: List[float], width: int, *, smoothing: float = 0.0) -> VisualizerFeatures:
+    """Compute visualizer features from already-normalized levels in [0, 1], oldest first.
+
+    This is what UI clients call with ``state.json["levels"]``; no live meter needed.
+    """
     width = max(1, width)
+    normalized = [max(0.0, min(1.0, float(v))) for v in levels]
+    if not normalized:
+        return _inactive_features(width)
 
-    if not is_active():
-        return VisualizerFeatures(
-            levels=[0.0] * width,
-            energy=0.0,
-            peak=0.0,
-            transient=0.0,
-            motion=0.0,
-            decay=0.0,
-            active=False,
-        )
-
-    with _lock:
-        raw_db = list(_levels)
-
-    if not raw_db:
-        return VisualizerFeatures(
-            levels=[0.0] * width,
-            energy=0.0,
-            peak=0.0,
-            transient=0.0,
-            motion=0.0,
-            decay=0.0,
-            active=False,
-        )
-
-    normalized = [_normalize_db(db) for db in raw_db]
     levels = _resample(normalized, width)
 
     if smoothing > 0.0:
@@ -185,8 +171,37 @@ def get_feature_snapshot(width: int, *, smoothing: float = 0.0) -> VisualizerFea
     )
 
 
+def get_feature_snapshot(width: int, *, smoothing: float = 0.0) -> VisualizerFeatures:
+    """Features from the in-process meter. Inactive when the meter is off."""
+    if not is_active():
+        return _inactive_features(max(1, width))
+    return features_from_levels(get_levels(64), width, smoothing=smoothing)
+
+
 def is_active() -> bool:
     return _running and _process is not None and _process.poll() is None
+
+
+_PLAYLIST_SUFFIXES = (".pls", ".m3u")
+
+
+def _resolve_playlist(url: str) -> str:
+    """mpv expands .pls/.m3u playlists itself, ffmpeg does not, so hand ffmpeg the first entry."""
+    if not urlparse(url).path.lower().endswith(_PLAYLIST_SUFFIXES):
+        return url
+    try:
+        import httpx
+        text = httpx.get(url, timeout=10, follow_redirects=True).text
+    except Exception:
+        logger.debug("playlist fetch failed for %s", url[:60], exc_info=True)
+        return url
+    for line in text.splitlines():
+        line = line.strip()
+        if line.lower().startswith("file") and "=" in line:
+            return line.split("=", 1)[1].strip()
+        if line and not line.startswith(("#", "[")) and "=" not in line:
+            return line
+    return url
 
 
 def _meter_loop(url: str) -> None:
@@ -194,6 +209,7 @@ def _meter_loop(url: str) -> None:
     global _process
 
     try:
+        url = _resolve_playlist(url)
         _process = subprocess.Popen(
             [
                 "ffmpeg",
