@@ -25,7 +25,7 @@ All under `RADIO_DIR = $HERMES_HOME/radio` (default `~/.hermes/radio`).
 | `config.yaml` | clients | User settings: volume, visualizer, decades, moods, presets, recent stations |
 | `stations.yaml` | user | Overrides the bundled curated station list |
 | `visualizers/*.yaml` | user | Extra visualizer presets |
-| `history.jsonl`, `tracks/`, `recordings/`, `mic_breaks/`, `radio.log` | daemon | Optional archives and the radio log |
+| `history.jsonl`, `tracks/`, `recordings/`, `radio.log` | daemon | Optional archives and the radio log |
 
 ## `state.json`
 
@@ -70,9 +70,9 @@ All under `RADIO_DIR = $HERMES_HOME/radio` (default `~/.hermes/radio`).
 
 The plugin writes this on `register()`. A client that finds no live socket
 spawns `python script` detached, with `hermes_root` prepended to `PYTHONPATH`
-so the daemon can import Hermes TTS and the auxiliary LLM client for mic
-breaks. Both imports are optional. Without them mic breaks are disabled and
-everything else works.
+so the daemon can import the Hermes Honcho tools for the optional
+listening-history sync. That import is optional. Without it the sync logs
+once and everything else works.
 
 ## `control.sock`
 
@@ -104,7 +104,6 @@ open and pipeline requests, or open one connection per call.
 | `adjust_volume` | `delta` | message string |
 | `start_recording` | `path=""` | message string |
 | `stop_recording` | | message string |
-| `mic_break` | `text=None` | message string |
 | `search` | `query`, `source="radio_browser"` | `{"results": [...]}`; sources: `radio_browser`, `somafm`, `radio_garden` |
 | `stations` | | `{"stations": [...]}` the curated list |
 | `stop` | | message string. Stops playback, kills mpv, replies, then the daemon exits. |
@@ -141,7 +140,6 @@ write_launcher(python: str, script: str, hermes_root: str | None)
 /radio mute                  toggle_mute
 /radio vol <0-100> | +N | -N set_volume / adjust_volume
 /radio rec [start|stop]      start_recording / stop_recording (toggle when omitted)
-/radio mic [text]            mic_break
 /radio search <query>        search, radio_browser
 /radio stations              curated list
 /radio viz [name|next|prev]  visualizer preset (client-side config, no daemon call)

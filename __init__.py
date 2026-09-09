@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 def _hermes_root(ctx) -> Optional[str]:
-    """The hermes-agent checkout the daemon imports for mic breaks. Optional; everything else works without it."""
+    """The hermes-agent checkout the daemon imports for the optional Honcho sync. Everything else works without it."""
     configured = ctx.get_config("hermes_root")
     if configured:
         return str(Path(str(configured)).expanduser())

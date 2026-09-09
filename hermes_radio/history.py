@@ -1,12 +1,11 @@
-"""Radio listening history and track/mic break archival.
+"""Radio listening history and track archival.
 
 Every feature is off unless its flag is set in config.yaml: ``history``,
-``save_tracks``, ``save_mic_breaks``, ``honcho_sync``.
+``save_tracks``, ``honcho_sync``.
 """
 
 import json
 import logging
-import os
 import shutil
 import time
 from datetime import datetime
@@ -27,10 +26,6 @@ def history_file() -> Path:
 
 def tracks_dir() -> Path:
     return paths.radio_dir() / "tracks"
-
-
-def mic_breaks_dir() -> Path:
-    return paths.radio_dir() / "mic_breaks"
 
 
 def _config_flag(key: str, default: bool = False) -> bool:
@@ -77,33 +72,6 @@ def log_track(
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception:
         logger.debug("Failed to write history", exc_info=True)
-
-
-def log_mic_break(
-    commentary: str,
-    audio_path: Optional[str] = None,
-    track_artist: str = "",
-    track_title: str = "",
-) -> None:
-    """Log a mic break to history."""
-    if not _config_flag("history"):
-        return
-
-    entry = {
-        "type": "mic_break",
-        "timestamp": datetime.now().isoformat(),
-        "epoch": time.time(),
-        "commentary": commentary,
-        "audio_path": audio_path,
-        "track_artist": track_artist,
-        "track_title": track_title,
-    }
-
-    try:
-        with open(history_file(), "a") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except Exception:
-        logger.debug("Failed to write mic break history", exc_info=True)
 
 
 def log_station(
@@ -206,34 +174,6 @@ def _tag_track(filepath: Path, artist: str, title: str, decade: int, country: st
     except Exception:
         if tagged.exists():
             tagged.unlink()
-
-
-# -- Mic break saving -------------------------------------------------------
-
-def save_mic_break(commentary: str, audio_path: Optional[str] = None) -> Optional[str]:
-    """Save mic break text and audio into mic_breaks/. Returns the text path, or None."""
-    if not _config_flag("save_mic_breaks"):
-        return None
-
-    out_dir = mic_breaks_dir()
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    text_path = out_dir / f"{ts}.txt"
-
-    try:
-        text_path.write_text(commentary, encoding="utf-8")
-
-        # Copy audio file alongside the text
-        if audio_path and os.path.exists(audio_path):
-            ext = Path(audio_path).suffix or ".mp3"
-            audio_dest = out_dir / f"{ts}{ext}"
-            shutil.copy2(audio_path, audio_dest)
-
-        return str(text_path)
-    except Exception:
-        logger.debug("Failed to save mic break", exc_info=True)
-        return None
 
 
 # -- Honcho sync ------------------------------------------------------------

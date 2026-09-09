@@ -18,7 +18,7 @@ const REQUEST_TIMEOUT_MS = 30_000
 const DIAL = '○◘◓◑◒●'
 const OFF_LINE = 'radio off  ·  /radio play <station>'
 const NOT_INSTALLED = 'no radio daemon: enable the hermes-radio plugin'
-const HELP = 'play soma crate local pause skip mute vol rec mic search stations stop'
+const HELP = 'play soma crate local pause skip mute vol rec search stations stop'
 // Braille dot masks accumulated from the bottom row up: 0, 1, 2, 3, 4 rows lit.
 const CELL_MASKS = [0x00, 0xc0, 0xe4, 0xf6, 0xff]
 
@@ -307,8 +307,6 @@ async function resolveCommand(tail) {
     case 'rec':
     case 'record':
       return recordingCommand(rest)
-    case 'mic':
-      return { method: 'mic_break', params: arg ? { text: arg } : {} }
     case 'search':
       return arg ? { method: 'search', params: { query: arg, source: 'radio_browser' } } : { local: 'usage: /radio search <query>' }
     case 'stations':
@@ -507,7 +505,7 @@ export default function register(sdk) {
     mode: 'ambient',
     zone: 'dock-bottom',
     width: WIDTH,
-    usage: 'usage: /radio [play <name|url> | soma [channel] | crate [1970 JPN slow] | pause | skip | mute | vol N | rec | mic | search | stations | stop | help]',
+    usage: 'usage: /radio [play <name|url> | soma [channel] | crate [1970 JPN slow] | pause | skip | mute | vol N | rec | search | stations | stop | help]',
 
     init(arg) {
       const tail = String(arg ?? '').trim()

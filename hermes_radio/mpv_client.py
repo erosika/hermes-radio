@@ -305,30 +305,6 @@ class MpvClient:
             return True
 
     # ------------------------------------------------------------------
-    # Volume ramp (for mic break ducking)
-    # ------------------------------------------------------------------
-
-    async def ramp_volume(self, target: float, duration_ms: int = 500, steps: int = 10) -> None:
-        """Smoothly ramp volume from current level to target over duration_ms."""
-        try:
-            current = await self.get_volume()
-        except Exception:
-            current = 100.0
-        delta = target - current
-        step_delay = duration_ms / 1000.0 / steps
-        for i in range(1, steps + 1):
-            vol = current + (delta * i / steps)
-            try:
-                await self.set_volume(vol)
-            except Exception:
-                break
-            if i < steps:
-                await asyncio.sleep(step_delay)
-
-    # ------------------------------------------------------------------
-    # Status snapshot
-    # ------------------------------------------------------------------
-
     async def status(self) -> Dict[str, Any]:
         """Return a snapshot of the current playback state."""
         if not self.running:

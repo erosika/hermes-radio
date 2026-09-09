@@ -14,7 +14,6 @@ provides_tools:
   - radio_skip
   - radio_status
   - radio_volume
-  - radio_mic_break
   - radio_record
   - radio_search
 python_dependencies:
@@ -30,4 +29,4 @@ external_dependencies:
 config_schema:
   hermes_root:
     type: str
-    description: "Path to a hermes-agent checkout the daemon imports for mic-break TTS and LLM commentary. Defaults to the running Hermes."
+    description: "Path to a hermes-agent checkout the daemon imports for the optional Honcho listening-history sync. Defaults to the running Hermes."

@@ -48,7 +48,6 @@ METHODS = frozenset({
     "adjust_volume",
     "start_recording",
     "stop_recording",
-    "mic_break",
     "search",
     "stations",
     "stop",

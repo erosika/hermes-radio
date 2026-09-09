@@ -167,12 +167,6 @@ def radio_record(args: Dict[str, Any], **_: Any) -> str:
     return _call("start_recording", path=str(args.get("path", "") or ""))
 
 
-def radio_mic_break(args: Dict[str, Any], **_: Any) -> str:
-    if not client.daemon_running():
-        return _fail("Radio is not playing")
-    return _call("mic_break", text=args.get("text"))
-
-
 def radio_search(args: Dict[str, Any], **_: Any) -> str:
     query = str(args.get("query", "") or "").strip()
     if not query:
@@ -232,15 +226,6 @@ SCHEMAS: List[Dict[str, Any]] = [
         },
     },
     {
-        "name": "radio_mic_break",
-        "description": "Trigger a DJ mic break. With text the DJ says that text. Without text the daemon writes "
-                       "commentary about the current and upcoming track.",
-        "parameters": {
-            "type": "object",
-            "properties": {"text": {"type": "string", "description": "Optional mic break text"}},
-        },
-    },
-    {
         "name": "radio_record",
         "description": "Record the current stream to disk under the radio directory. action: start, stop, or "
                        "toggle.",
@@ -274,7 +259,6 @@ HANDLERS = {
     "radio_skip": radio_skip,
     "radio_status": radio_status,
     "radio_volume": radio_volume,
-    "radio_mic_break": radio_mic_break,
     "radio_record": radio_record,
     "radio_search": radio_search,
 }

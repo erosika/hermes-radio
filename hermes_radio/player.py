@@ -1,14 +1,13 @@
-"""Hermes Radio engine: mpv, sources, crate digging, mic breaks, recording.
+"""Hermes Radio engine: mpv, sources, crate digging, recording.
 
 The daemon holds one instance and dispatches every protocol method to the same-named coroutine here.
 """
 
 import asyncio
-import json
 import logging
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -77,7 +76,6 @@ class NowPlaying:
     volume: float = 80.0
     paused: bool = False
     station_name: str = ""
-    recent_tracks: List[Dict[str, str]] = field(default_factory=list)
 
 
 class HermesRadio:
@@ -87,7 +85,6 @@ class HermesRadio:
         # Per-home socket paths so two Hermes homes on one machine never share an mpv.
         radio_dir = paths.radio_dir()
         self._primary = MpvClient(socket_path=str(radio_dir / "mpv-main.sock"), label="main")
-        self._voice = MpvClient(socket_path=str(radio_dir / "mpv-voice.sock"), label="voice")
         self._source_mode: SourceMode = SourceMode.CRATE
         self._now = NowPlaying()
         try:
@@ -96,13 +93,6 @@ class HermesRadio:
             pass
         self._crate_task: Optional[asyncio.Task] = None
         self._skip_event: Optional[asyncio.Event] = None
-        self._mic_break_active = False
-        self._auto_mic_breaks = True
-        self._mic_break_persona = "encyclopedic"
-        self._duck_volume = 15
-        self._duck_ramp_ms = 500
-        self._tracks_since_break = 0
-        self._break_every_n = 3
         self._running = False
         self._on_state_change: Optional[Callable] = None
         self._radiooooo: Optional[RadioooooClient] = None
@@ -163,8 +153,6 @@ class HermesRadio:
         self._state_poll_task = None
 
         await self._primary.stop()
-        if self._voice.running:
-            await self._voice.stop()
 
         try:
             level_meter.stop()
@@ -343,8 +331,6 @@ class HermesRadio:
         """Skip to the next track."""
         if not self._running:
             return "Radio is not playing"
-        if self._mic_break_active:
-            await self._abort_mic_break()
         if self._source_mode == SourceMode.CRATE:
             if self._skip_event:
                 self._skip_event.set()
@@ -613,16 +599,6 @@ class HermesRadio:
         self._now.mood = track.mood
         self._now.paused = False
 
-        self._now.recent_tracks.append({
-            "title": track.title,
-            "artist": track.artist,
-            "decade": str(track.decade),
-            "country": track.country,
-            "mood": track.mood,
-        })
-        if len(self._now.recent_tracks) > 10:
-            self._now.recent_tracks = self._now.recent_tracks[-10:]
-
         try:
             history.log_track(
                 artist=track.artist, title=track.title, source="crate",
@@ -695,12 +671,6 @@ class HermesRadio:
 
                 await self._play_track(next_track)
 
-                self._tracks_since_break += 1
-                if self._auto_mic_breaks and self._tracks_since_break >= self._break_every_n:
-                    await asyncio.sleep(2.0)
-                    await self._do_mic_break(next_track)
-                    self._tracks_since_break = 0
-
         except asyncio.CancelledError:
             pass
         except Exception:
@@ -710,195 +680,6 @@ class HermesRadio:
         if self._crate_task and not self._crate_task.done():
             self._crate_task.cancel()
         self._crate_task = None
-
-    # ------------------------------------------------------------------
-    # Mic breaks
-    # ------------------------------------------------------------------
-
-    async def mic_break(self, text: Optional[str] = None) -> str:
-        """Speak ``text``, or generate commentary when omitted."""
-        if not self._running:
-            return "Radio is not playing"
-        if self._mic_break_active:
-            return "Mic break already in progress"
-
-        if text:
-            spoken = await self._speak(text)
-        else:
-            spoken = await self._do_mic_break()
-        return "Mic break done" if spoken else "Mic breaks unavailable: Hermes TTS and LLM client not importable"
-
-    async def _do_mic_break(self, upcoming_track=None) -> bool:
-        """Generate and play a mic break with volume ducking. Returns True when audio played."""
-        if self._mic_break_active:
-            return False
-
-        self._mic_break_active = True
-        try:
-            commentary = await self._generate_commentary(upcoming_track)
-            if not commentary:
-                return False
-
-            audio_path = await self._render_tts(commentary)
-            if not audio_path:
-                return False
-            radio_log.mic(commentary)
-            await self._speak_audio(audio_path)
-
-            try:
-                history.log_mic_break(
-                    commentary=commentary,
-                    audio_path=audio_path,
-                    track_artist=self._now.artist,
-                    track_title=self._now.title,
-                )
-                history.save_mic_break(commentary, audio_path)
-            except Exception:
-                logger.debug("mic break archive failed", exc_info=True)
-            return True
-        except Exception:
-            logger.exception("Mic break error")
-            return False
-        finally:
-            self._mic_break_active = False
-
-    async def _speak(self, text: str) -> bool:
-        self._mic_break_active = True
-        try:
-            audio_path = await self._render_tts(text)
-            if not audio_path:
-                return False
-            radio_log.mic(text)
-            await self._speak_audio(audio_path)
-            return True
-        finally:
-            self._mic_break_active = False
-
-    async def _speak_audio(self, audio_path: str) -> None:
-        """Play a rendered clip on the voice mpv while ducking the music."""
-        if not self._voice.running:
-            await self._voice.start()
-
-        await self._primary.ramp_volume(self._duck_volume, duration_ms=self._duck_ramp_ms)
-
-        await self._voice.set_volume(65)
-        await self._voice.loadfile(audio_path)
-
-        voice_end = asyncio.Event()
-
-        def on_voice_end(data):
-            voice_end.set()
-
-        self._voice.on("end-file", on_voice_end)
-        try:
-            await asyncio.wait_for(voice_end.wait(), timeout=30.0)
-        except asyncio.TimeoutError:
-            pass
-        finally:
-            if on_voice_end in self._voice._event_callbacks.get("end-file", []):
-                self._voice._event_callbacks["end-file"].remove(on_voice_end)
-
-        await self._primary.ramp_volume(self._now.volume, duration_ms=self._duck_ramp_ms)
-
-    async def _abort_mic_break(self) -> None:
-        if self._voice.running:
-            await self._voice.stop()
-        await self._primary.set_volume(self._now.volume)
-        self._mic_break_active = False
-
-    def _log_unavailable(self, key: str, message: str) -> None:
-        if key in self._unavailable_logged:
-            return
-        self._unavailable_logged.add(key)
-        radio_log.info(message)
-        logger.warning(message)
-
-    async def _render_tts(self, text: str) -> Optional[str]:
-        """Render text to audio with Hermes TTS. None when the tool is not importable."""
-        try:
-            from tools.tts_tool import text_to_speech_tool
-        except Exception:
-            self._log_unavailable("tts", "mic breaks unavailable: tools.tts_tool not importable (set hermes_root)")
-            return None
-        try:
-            result_json = await asyncio.get_running_loop().run_in_executor(
-                None, lambda: text_to_speech_tool(text=text)
-            )
-            result = json.loads(result_json)
-            if result.get("success"):
-                return result["file_path"]
-            logger.warning("TTS failed: %s", result.get("error"))
-            return None
-        except Exception:
-            logger.exception("TTS render error")
-            return None
-
-    async def _generate_commentary(self, upcoming_track=None) -> Optional[str]:
-        """Generate DJ commentary with the Hermes auxiliary LLM. None when it is not importable."""
-        try:
-            from agent.auxiliary_client import call_llm
-        except Exception:
-            self._log_unavailable("llm", "mic breaks unavailable: agent.auxiliary_client not importable (set hermes_root)")
-            return None
-
-        now = self._now
-        hour = time.localtime().tm_hour
-        if hour < 6:
-            time_vibe = "late night"
-        elif hour < 12:
-            time_vibe = "morning"
-        elif hour < 18:
-            time_vibe = "afternoon"
-        else:
-            time_vibe = "evening"
-
-        current = f"{now.artist} - {now.title}" if now.title else "unknown"
-        recent = "; ".join(
-            f"{t['artist']} - {t['title']} ({t['decade']}s, {t['country']})"
-            for t in now.recent_tracks[-5:]
-        )
-
-        upcoming_info = ""
-        if upcoming_track:
-            upcoming_info = f"\nComing up next: {upcoming_track.artist} - {upcoming_track.title} ({upcoming_track.decade}s, {upcoming_track.country}, {upcoming_track.mood})"
-
-        persona_prompts = {
-            "encyclopedic": "You're a deeply knowledgeable music historian DJ. Share fascinating context about the music -- provenance, cultural significance, recording history, the label, the scene.",
-            "deadpan": "You're a dry, sardonic late-night DJ. Minimal words, maximum effect. Understated observations.",
-            "enthusiastic": "You're an infectiously excited college radio DJ discovering music for the first time. Genuinely thrilled.",
-            "conspiratorial": "You're a paranoid late-night DJ who sees hidden connections between every track. Everything is linked.",
-        }
-        persona = persona_prompts.get(self._mic_break_persona, persona_prompts["encyclopedic"])
-
-        prompt = f"""{persona}
-
-You're doing a mic break on Hermes Radio. It's {time_vibe}. Keep it to 1-3 sentences. Conversational, not scripted. Never mention being an AI. No hashtags.
-
-Just played: {current}
-Recent history: {recent}{upcoming_info}
-Source: {now.source_mode}"""
-
-        try:
-            messages = [{"role": "user", "content": prompt}]
-            response = await asyncio.get_running_loop().run_in_executor(
-                None,
-                lambda: call_llm(
-                    task="radio",
-                    messages=messages,
-                    max_tokens=150,
-                    temperature=0.9,
-                    timeout=10.0,
-                ),
-            )
-            text = response.choices[0].message.content
-            if text and text.strip():
-                return text.strip()
-        except Exception:
-            logger.debug("LLM commentary generation failed, using template", exc_info=True)
-
-        if upcoming_track:
-            return f"That was {now.artist}. Coming up, {upcoming_track.artist} from the {upcoming_track.decade}s."
-        return f"You're listening to Hermes Radio. That was {now.artist} -- {now.title}."
 
     # ------------------------------------------------------------------
     # mpv event handlers
@@ -961,23 +742,9 @@ Source: {now.source_mode}"""
     def configure(self, config: dict) -> None:
         """Apply the ``radio:`` section of the main Hermes config.yaml."""
         radio_cfg = config.get("radio", {})
-        mic_cfg = radio_cfg.get("mic_breaks", {})
         crate_cfg = radio_cfg.get("crate", {})
 
         self._now.volume = radio_cfg.get("default_volume", self._now.volume)
-        self._auto_mic_breaks = mic_cfg.get("enabled", True)
-        self._mic_break_persona = mic_cfg.get("persona", "encyclopedic")
-        self._duck_volume = mic_cfg.get("duck_volume", 20)
-        self._duck_ramp_ms = mic_cfg.get("duck_ramp_ms", 800)
-
-        freq = mic_cfg.get("frequency", "every_track")
-        if freq == "every_track":
-            self._break_every_n = 1
-        elif freq == "manual":
-            self._auto_mic_breaks = False
-        else:
-            self._break_every_n = mic_cfg.get("interval", 3)
-
         self._crate_decades = crate_cfg.get("decades")
         self._crate_moods = crate_cfg.get("moods")
         self._crate_country = None

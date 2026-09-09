@@ -9,7 +9,7 @@ One detached mpv daemon does the playing. Every Hermes surface talks to it:
 
 | Surface | What you get |
 |---|---|
-| Agent tools | `radio_play`, `radio_pause`, `radio_stop`, `radio_skip`, `radio_status`, `radio_volume`, `radio_record`, `radio_mic_break`, `radio_search` in the `radio` toolset |
+| Agent tools | `radio_play`, `radio_pause`, `radio_stop`, `radio_skip`, `radio_status`, `radio_volume`, `radio_record`, `radio_search` in the `radio` toolset |
 | `/radio ...` | Slash command in the classic CLI, the Ink TUI, and gateway chats |
 | `hermes radio ...` | Same grammar from the shell |
 | `hermes-radio` | Classic CLI with a mini player under the input and `Ctrl+R` transport controls |
@@ -57,7 +57,6 @@ Adjust the path if your Hermes checkout lives elsewhere. `hermes-radio` accepts 
 /radio pause  skip  mute
 /radio vol 60   vol +5   vol -5
 /radio rec                    record the stream to ~/.hermes/radio/recordings/
-/radio mic [text]             DJ mic break (needs Hermes TTS)
 /radio search lagos
 /radio viz braille            visualizer preset: blocks, braille, scatter, or your own
 /radio stop                   stop playback and the daemon
@@ -85,7 +84,7 @@ Everything mutable lives under `~/.hermes/radio` (or `$HERMES_HOME/radio`).
 | `config.yaml` | volume, visualizer, crate decades and moods, recent stations, presets |
 | `stations.yaml` | your curated list; overrides the bundled one |
 | `visualizers/*.yaml` | your visualizer presets |
-| `recordings/`, `tracks/`, `mic_breaks/`, `history.jsonl` | archives, each gated by a config flag |
+| `recordings/`, `tracks/`, `history.jsonl` | archives, each gated by a config flag |
 | `state.json`, `control.sock`, `daemon.pid`, `daemon.json`, `radio.log` | daemon runtime |
 
 ## How it works
@@ -130,9 +129,8 @@ hermes radio play nts
   keybindings in the TUI yet, so `Ctrl+R` there waits on an upstream hook.
 - Desktop app: not wired. The desktop plugin SDK supports panes and keybinds,
   so a mini player there is possible as a follow-up.
-- Mic breaks need Hermes TTS and the auxiliary LLM client importable inside
-  the daemon. The plugin records the Hermes checkout in `daemon.json` for that.
-  Without them the rest of the radio works and mic breaks report unavailable.
+- No DJ. The March branch had TTS mic breaks between crate tracks. This
+  plugin plays music and nothing that talks.
 
 ## History
 

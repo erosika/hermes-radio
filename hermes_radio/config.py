@@ -59,16 +59,6 @@ def set_moods(moods: Set[str]) -> None:
     save(cfg)
 
 
-def get_mic_breaks() -> bool:
-    return load().get("mic_breaks", True)
-
-
-def set_mic_breaks(enabled: bool) -> None:
-    cfg = load()
-    cfg["mic_breaks"] = enabled
-    save(cfg)
-
-
 def get_volume() -> int:
     return load().get("volume", 80)
 

@@ -72,11 +72,9 @@ class RadioMenuState:
         try:
             self.active_decades: Set[int] = set(config.get_decades())
             self.active_moods: Set[str] = set(config.get_moods())
-            self.mic_breaks: bool = bool(config.get_mic_breaks())
         except Exception:
             self.active_decades = set(DEFAULT_DECADES)
             self.active_moods = set(DEFAULT_MOODS)
-            self.mic_breaks = True
         self._in_crate_config = False
         self._crate_country: Optional[str] = None
         self._active_countries: Set[str] = set()
@@ -91,8 +89,6 @@ class RadioMenuState:
                 item.toggled = int(tk.split(":")[1]) in self.active_decades
             elif tk.startswith("mood:"):
                 item.toggled = tk.split(":")[1] in self.active_moods
-            elif tk == "mic_breaks":
-                item.toggled = self.mic_breaks
             elif tk.startswith("country:"):
                 item.toggled = tk.split(":")[1] in self._active_countries
             elif tk == "save_tracks":
@@ -144,8 +140,6 @@ class RadioMenuState:
                     self.active_moods.discard(mood)
             else:
                 self.active_moods.add(mood)
-        elif tk == "mic_breaks":
-            self.mic_breaks = not self.mic_breaks
         elif tk.startswith("country:"):
             self._active_countries ^= {tk.split(":")[1]}
         elif tk == "save_tracks":
@@ -158,7 +152,6 @@ class RadioMenuState:
         try:
             config.set_decades(self.active_decades)
             config.set_moods(self.active_moods)
-            config.set_mic_breaks(self.mic_breaks)
         except Exception:
             pass
         self._sync_toggles()
@@ -176,7 +169,7 @@ class RadioMenuState:
         if item.action == "crate" and not self._in_crate_config:
             self._in_crate_config = True
             self._crate_country = item.data.get("country")
-            self.items = build_crate_config(mic_breaks=self.mic_breaks)
+            self.items = build_crate_config()
             self.selectable = [i for i, it in enumerate(self.items) if not it.is_header]
             self.cursor = 0
             self.viewport_start = 0
@@ -197,12 +190,10 @@ class RadioMenuState:
         self.done.set()
 
 
-def build_crate_config(mic_breaks: bool = True) -> List[MenuItem]:
+def build_crate_config() -> List[MenuItem]:
     items: List[MenuItem] = [MenuItem(label="CRATE DIGGER CONFIG", is_header=True)]
     items.append(MenuItem(label="Save MP3s to disk", sublabel="~/.hermes/radio/tracks/", is_toggle=True,
                           toggle_key="save_tracks"))
-    items.append(MenuItem(label="Mic breaks", sublabel="AI DJ commentary", is_toggle=True, toggled=mic_breaks,
-                          toggle_key="mic_breaks"))
     items.append(MenuItem(label="DECADES", is_header=True))
     for decade in range(1930, 2030, 10):
         items.append(MenuItem(label=f"{decade}s", is_toggle=True, toggle_key=f"decade:{decade}"))
@@ -218,7 +209,7 @@ def build_crate_config(mic_breaks: bool = True) -> List[MenuItem]:
 
 
 def build_menu_items(now_playing: Optional[Dict[str, Any]] = None, soma_channels=None,
-                     presets: Optional[Dict[str, Dict[str, Any]]] = None, mic_breaks: bool = True) -> List[MenuItem]:
+                     presets: Optional[Dict[str, Dict[str, Any]]] = None) -> List[MenuItem]:
     """Top-level menu: now playing, recent, visualizer, options, crate, presets, curated stations, search."""
     try:
         active_visualizer = config.get_visualizer()
@@ -259,8 +250,6 @@ def build_menu_items(now_playing: Optional[Dict[str, Any]] = None, soma_channels
     items.append(MenuItem(label="OPTIONS", is_header=True))
     items.append(MenuItem(label="Save MP3s to disk", sublabel="~/.hermes/radio/tracks/", is_toggle=True,
                           toggle_key="save_tracks"))
-    items.append(MenuItem(label="Mic breaks", sublabel="AI DJ commentary", is_toggle=True, toggled=mic_breaks,
-                          toggle_key="mic_breaks"))
 
     items.append(MenuItem(label="CRATE DIGGER", is_header=True))
     items.append(MenuItem(label="Crate Digger", sublabel="configure + start", action="crate"))
@@ -393,7 +382,7 @@ def render_menu(state: RadioMenuState) -> List[Tuple[str, str]]:
         viz_str = config.get_visualizer()
     except Exception:
         viz_str = "braille"
-    footer = f"decades: {decades_str}  moods: {moods_str}  mic: {'on' if state.mic_breaks else 'off'}  viz: {viz_str}"
+    footer = f"decades: {decades_str}  moods: {moods_str}  viz: {viz_str}"
     _bordered(fragments, "class:radio-menu-dim", footer)
     fragments.append(("class:radio-menu-border", f"  {BOX_BL}{BOX_H * (MENU_WIDTH - 2)}{BOX_BR}\n"))
     return fragments

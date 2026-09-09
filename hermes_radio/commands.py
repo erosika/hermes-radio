@@ -18,7 +18,6 @@ HELP = """\
 /radio mute                  mute or unmute
 /radio vol <0-100> | +N | -N volume
 /radio rec [start|stop]      record the stream to disk
-/radio mic [text]            DJ mic break
 /radio search <query>        search Radio Browser
 /radio stations              curated station list
 /radio viz [name|next|prev]  visualizer preset
@@ -136,10 +135,6 @@ def _rec(args: List[str]) -> str:
     return "usage: /radio rec [start|stop]"
 
 
-def _mic(args: List[str]) -> str:
-    return _text(client.call("mic_break", text=" ".join(args) or None))
-
-
 def _search(args: List[str]) -> str:
     if not args:
         return "usage: /radio search <query>"
@@ -199,7 +194,6 @@ DISPATCH: Dict[str, Callable[[List[str]], str]] = {
     "volume": _vol,
     "rec": _rec,
     "record": _rec,
-    "mic": _mic,
     "search": _search,
     "stations": _stations,
     "viz": _viz,

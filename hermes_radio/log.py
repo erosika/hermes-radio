@@ -64,11 +64,6 @@ def pause(paused: bool):
     _get_logger().info("PAUSE  %s", "paused" if paused else "resumed")
 
 
-def mic(text: str):
-    short = text[:80] + "..." if len(text) > 80 else text
-    _get_logger().info("MIC    \"%s\"", short)
-
-
 def end(reason: str = "eof"):
     _get_logger().info("END    %s", reason)
 
